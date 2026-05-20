@@ -1,0 +1,58 @@
+# Visual Studio / MSBuild
+.vs/
+*.user
+*.suo
+*.VC.db
+*.VC.VC.opendb
+ipch/
+Debug/
+Release/
+x64/
+x86/
+Win32/
+[Bb]in/
+[Oo]bj/
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+build/
+out/
+
+# vcpkg local installs
+vcpkg_installed/
+.vcpkg/
+
+# Build outputs
+*.exe
+*.dll
+*.pdb
+*.ilk
+*.obj
+*.lib
+*.exp
+*.idb
+*.log
+
+# Generated codec/video artifacts
+*.walsh
+*.wlsv
+*_decoded.*
+*_from_walsh.*
+*_channel_*.png
+*_diff.*
+diff_*.png
+codec_tests/
+test_results/
+dump_output/
+frames_output/
+decoded_frames/
+temp_frames/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*.tmp

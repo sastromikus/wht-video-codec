@@ -1,0 +1,16 @@
+* text=auto eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary assets
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.bmp binary
+*.tga binary
+*.mp4 binary
+*.avi binary
+*.mkv binary
+*.walsh binary
+*.wlsv binary
+*.docx binary

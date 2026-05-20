@@ -1,0 +1,9 @@
+{
+  "name": "walsh-video-codec",
+  "version-string": "0.1.0",
+  "description": "Educational intra-only Walsh-Hadamard transform codec for images and frame sequences.",
+  "dependencies": [
+    "zlib",
+    "ffmpeg"
+  ]
+}
