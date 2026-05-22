@@ -123,6 +123,103 @@ namespace {
         return validateHeader(header) && header.frameCount >= 0;
     }
 
+
+    std::size_t getFileSizeForVideoInfo(const std::string& path) {
+        std::ifstream in(path, std::ios::binary | std::ios::ate);
+
+        if (!in) {
+            return 0;
+        }
+
+        return static_cast<std::size_t>(in.tellg());
+    }
+
+    WalshChannelInfo analyzeVideoEncodedChannel(const EncodedChannel& channel) {
+        WalshChannelInfo info{};
+
+        if (channel.blockOffsets.size() < 2) {
+            return info;
+        }
+
+        const std::size_t blockCount = channel.blockOffsets.size() - 1;
+        info.blockCount = static_cast<uint32_t>(blockCount);
+        info.rleIntCount = channel.rleData.size();
+        info.rlePairCount = channel.rleData.size() / 2;
+
+        for (std::size_t blockIndex = 0; blockIndex < blockCount; ++blockIndex) {
+            const std::size_t begin = channel.blockOffsets[blockIndex];
+            const std::size_t end = channel.blockOffsets[blockIndex + 1];
+
+            if (begin > end || end > channel.rleData.size()) {
+                continue;
+            }
+
+            const std::size_t blockIntCount = end - begin;
+
+            if (blockIntCount == 2 && channel.rleData[begin + 1] == 0) {
+                ++info.emptyBlocks;
+            }
+
+            if (blockIntCount % 2 != 0) {
+                continue;
+            }
+
+            const std::size_t pairCount = blockIntCount / 2;
+
+            if (pairCount > 0) {
+                // Last pair is trailingZeroRun / 0, so it is not a non-zero token.
+                info.nonZeroTokens += static_cast<uint64_t>(pairCount - 1);
+            }
+
+            for (std::size_t i = begin; i + 1 < end; i += 2) {
+                const int zeroRun = channel.rleData[i];
+                const int value = channel.rleData[i + 1];
+
+                if (zeroRun > info.maxZeroRun) {
+                    info.maxZeroRun = zeroRun;
+                }
+
+                if (value != 0) {
+                    const int absValue = value < 0 ? -value : value;
+
+                    if (absValue > info.maxAbsValue) {
+                        info.maxAbsValue = absValue;
+                    }
+                }
+            }
+        }
+
+        if (info.blockCount > 0) {
+            info.averageNonZeroTokensPerBlock =
+                static_cast<double>(info.nonZeroTokens) /
+                static_cast<double>(info.blockCount);
+        }
+
+        return info;
+    }
+
+    void addChannelInfo(WalshChannelInfo& dst, const WalshChannelInfo& src) {
+        dst.blockCount += src.blockCount;
+        dst.rleIntCount += src.rleIntCount;
+        dst.rlePairCount += src.rlePairCount;
+        dst.emptyBlocks += src.emptyBlocks;
+        dst.nonZeroTokens += src.nonZeroTokens;
+
+        if (src.maxAbsValue > dst.maxAbsValue) {
+            dst.maxAbsValue = src.maxAbsValue;
+        }
+
+        if (src.maxZeroRun > dst.maxZeroRun) {
+            dst.maxZeroRun = src.maxZeroRun;
+        }
+
+        if (dst.blockCount > 0) {
+            dst.averageNonZeroTokensPerBlock =
+                static_cast<double>(dst.nonZeroTokens) /
+                static_cast<double>(dst.blockCount);
+        }
+    }
+
     bool frameMatchesVideoHeader(const EncodedFrame& frame, const WalshVideoHeader& header) {
         return frame.width == header.width &&
             frame.height == header.height &&
@@ -269,5 +366,94 @@ bool WalshVideoReader::readNextFrame(EncodedFrame& frame) {
     }
 
     ++currentFrameIndex_;
+    return true;
+}
+
+
+bool readWalshVideoFileInfo(const std::string& path, WalshVideoFileInfo& info) {
+    info = WalshVideoFileInfo{};
+    info.path = path;
+    info.fileSize = getFileSizeForVideoInfo(path);
+
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        return false;
+    }
+
+    WalshVideoHeader loadedHeader{};
+    if (!readHeader(in, loadedHeader)) {
+        return false;
+    }
+
+    info.header = loadedHeader;
+    info.framesInfo.reserve(static_cast<std::size_t>(loadedHeader.frameCount));
+
+    for (int frameIndex = 0; frameIndex < loadedHeader.frameCount; ++frameIndex) {
+        uint32_t size = 0;
+        if (!readValue(in, size)) {
+            return false;
+        }
+
+        std::vector<uint8_t> bytes(size);
+        if (size > 0) {
+            in.read(
+                reinterpret_cast<char*>(bytes.data()),
+                static_cast<std::streamsize>(bytes.size()));
+
+            if (!in.good()) {
+                return false;
+            }
+        }
+
+        WalshVideoFrameInfo frameInfo{};
+        frameInfo.payloadSize = size;
+
+        EncodedFrame frame{};
+        if (!loadEncodedFrameFromBytes(bytes, frame)) {
+            return false;
+        }
+
+        if (!frameMatchesVideoHeader(frame, loadedHeader)) {
+            return false;
+        }
+
+        frameInfo.channels = frame.channels;
+        frameInfo.channelsInfo.reserve(frame.channelData.size());
+
+        if (info.totalChannelsInfo.empty()) {
+            info.totalChannelsInfo.resize(frame.channelData.size());
+        } else if (info.totalChannelsInfo.size() != frame.channelData.size()) {
+            return false;
+        }
+
+        for (std::size_t channelIndex = 0; channelIndex < frame.channelData.size(); ++channelIndex) {
+            WalshChannelInfo channelInfo = analyzeVideoEncodedChannel(frame.channelData[channelIndex]);
+            frameInfo.channelsInfo.push_back(channelInfo);
+            addChannelInfo(info.totalChannelsInfo[channelIndex], channelInfo);
+        }
+
+        if (info.framesInfo.empty()) {
+            info.minFramePayloadSize = size;
+            info.maxFramePayloadSize = size;
+        } else {
+            if (size < info.minFramePayloadSize) {
+                info.minFramePayloadSize = size;
+            }
+
+            if (size > info.maxFramePayloadSize) {
+                info.maxFramePayloadSize = size;
+            }
+        }
+
+        info.totalFramePayloadSize += size;
+        info.framesInfo.push_back(std::move(frameInfo));
+    }
+
+    if (!info.framesInfo.empty()) {
+        info.averageFramePayloadSize =
+            static_cast<double>(info.totalFramePayloadSize) /
+            static_cast<double>(info.framesInfo.size());
+    }
+
     return true;
 }

@@ -1,7 +1,9 @@
 #pragma once
 
 #include "types.h"
+#include "encoded_io.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -18,6 +20,28 @@ struct WalshVideoHeader {
     int quantStep = 16;
     bool isGrayscale = false;
     bool useYCbCr = true;
+};
+
+struct WalshVideoFrameInfo {
+    uint32_t payloadSize = 0;
+    int channels = 0;
+
+    std::vector<WalshChannelInfo> channelsInfo;
+};
+
+struct WalshVideoFileInfo {
+    std::string path;
+    std::size_t fileSize = 0;
+
+    WalshVideoHeader header{};
+
+    uint64_t totalFramePayloadSize = 0;
+    uint32_t minFramePayloadSize = 0;
+    uint32_t maxFramePayloadSize = 0;
+    double averageFramePayloadSize = 0.0;
+
+    std::vector<WalshVideoFrameInfo> framesInfo;
+    std::vector<WalshChannelInfo> totalChannelsInfo;
 };
 
 // Simple intra-only Walsh-video container.
@@ -60,3 +84,4 @@ private:
 };
 
 bool isWalshVideoFile(const std::string& path);
+bool readWalshVideoFileInfo(const std::string& path, WalshVideoFileInfo& info);

@@ -82,8 +82,8 @@ namespace {
             << "  " << exeName << " <input_video.mp4|avi|mkv> -fps 1 -w output.wlsv [options]\n"
             << "  " << exeName << " <input_video.wlsv> -o output.mp4\n"
             << "  " << exeName << " -test <input_lossless.png|bmp> [output_dir]\n"
-            << "  " << exeName << " -info <input_stream.walsh>\n"
-            << "  " << exeName << " <input_stream.walsh> -info\n"
+            << "  " << exeName << " -info <input_stream.walsh|input_video.wlsv>\n"
+            << "  " << exeName << " <input_stream.walsh|input_video.wlsv> -info\n"
             << "  " << exeName << " -dump <input_stream.walsh> [output_dir]\n"
             << "  " << exeName << " <input_stream.walsh> -dump [output_dir]\n"
             << "  " << exeName << " -diff <image_a> <image_b> <diff_output> [amplify]\n"
@@ -107,7 +107,7 @@ namespace {
             << "  -test-codecs      compare Walsh modes with JPEG qualities\n\n"
 
             << "Info options:\n"
-            << "  -info             print .walsh container and channel statistics\n\n"
+            << "  -info             print .walsh/.wlsv container and channel statistics\n\n"
 
             << "Dump options:\n"
             << "  -dump             decode .walsh and save decoded image plus channel images\n\n"
@@ -127,6 +127,7 @@ namespace {
             << "  " << exeName << " source.png -mode gray -quant 32\n"
             << "  " << exeName << " output.walsh -out decoded.png\n"
             << "  " << exeName << " -info output.walsh\n"
+            << "  " << exeName << " -info output.wlsv\n"
             << "  " << exeName << " output.walsh -dump dump_output\n"
             << "  " << exeName << " -diff source.png output.png diff.png 8\n"
             << "  " << exeName << " -test source.png test_results\n"
@@ -479,6 +480,19 @@ namespace {
         }
 
         if (info.useYCbCr) {
+            return "ycbcr";
+        }
+
+        return "rgb";
+    }
+
+
+    std::string walshVideoModeToString(const WalshVideoHeader& header) {
+        if (header.isGrayscale) {
+            return "grayscale";
+        }
+
+        if (header.useYCbCr) {
             return "ycbcr";
         }
 
@@ -944,6 +958,124 @@ namespace {
 
         std::cout << "\nInfo done.\n";
 
+        return 0;
+    }
+
+    int runWalshVideoInfo(const std::string& path) {
+        WalshVideoFileInfo info{};
+
+        if (!readWalshVideoFileInfo(path, info)) {
+            std::cerr << "Error: failed to read .wlsv info.\n";
+            return 1;
+        }
+
+        std::cout << "\n=== Walsh video file info ===\n";
+        std::cout << "File:                " << info.path << "\n";
+        std::cout << "Format:              WLSV v" << info.header.version << "\n";
+
+        std::cout << "File size:           ";
+        printBytesAsKb(info.fileSize);
+        std::cout << " (" << info.fileSize << " bytes)\n";
+
+        std::cout << "Frame payload total: ";
+        printBytesAsKb(static_cast<std::size_t>(info.totalFramePayloadSize));
+        std::cout << " (" << info.totalFramePayloadSize << " bytes)\n";
+
+        if (!info.framesInfo.empty()) {
+            std::cout << "Frame payload min:   ";
+            printBytesAsKb(info.minFramePayloadSize);
+            std::cout << " (" << info.minFramePayloadSize << " bytes)\n";
+
+            std::cout << "Frame payload max:   ";
+            printBytesAsKb(info.maxFramePayloadSize);
+            std::cout << " (" << info.maxFramePayloadSize << " bytes)\n";
+
+            std::cout << "Frame payload avg:   ";
+            printBytesAsKb(static_cast<std::size_t>(info.averageFramePayloadSize));
+            std::cout << " (" << info.averageFramePayloadSize << " bytes)\n";
+        }
+
+        std::cout << "\n=== Encoded video ===\n";
+        std::cout << "Size:                " << info.header.width << "x" << info.header.height << "\n";
+        std::cout << "FPS:                 " << info.header.fps << "\n";
+        std::cout << "Frames:              " << info.header.frameCount << "\n";
+        std::cout << "Mode:                " << walshVideoModeToString(info.header) << "\n";
+        std::cout << "Block size:          " << info.header.blockSize << "\n";
+        std::cout << "Quant step:          " << info.header.quantStep << "\n";
+
+        if (info.header.fps > 0) {
+            const double durationSeconds =
+                static_cast<double>(info.header.frameCount) /
+                static_cast<double>(info.header.fps);
+
+            std::cout << "Duration:            " << durationSeconds << " s\n";
+        }
+
+        if (!info.totalChannelsInfo.empty()) {
+            std::cout << "\n=== Aggregated channel statistics ===\n";
+
+            uint64_t totalBlocks = 0;
+            uint64_t totalEmptyBlocks = 0;
+            uint64_t totalNonZeroTokens = 0;
+            std::size_t totalRleInts = 0;
+
+            for (std::size_t i = 0; i < info.totalChannelsInfo.size(); ++i) {
+                const WalshChannelInfo& c = info.totalChannelsInfo[i];
+
+                totalBlocks += c.blockCount;
+                totalEmptyBlocks += c.emptyBlocks;
+                totalNonZeroTokens += c.nonZeroTokens;
+                totalRleInts += c.rleIntCount;
+
+                double emptyPercent = 0.0;
+                if (c.blockCount > 0) {
+                    emptyPercent =
+                        100.0 *
+                        static_cast<double>(c.emptyBlocks) /
+                        static_cast<double>(c.blockCount);
+                }
+
+                std::cout << "Channel " << i << ":\n";
+                std::cout << "  Blocks:            " << c.blockCount << "\n";
+                std::cout << "  Empty blocks:      " << c.emptyBlocks << " (" << emptyPercent << " %)\n";
+                std::cout << "  RLE ints:          " << c.rleIntCount << "\n";
+                std::cout << "  RLE pairs:         " << c.rlePairCount << "\n";
+                std::cout << "  Non-zero tokens:   " << c.nonZeroTokens << "\n";
+                std::cout << "  Avg tokens/block:  " << c.averageNonZeroTokensPerBlock << "\n";
+                std::cout << "  Max zero run:      " << c.maxZeroRun << "\n";
+                std::cout << "  Max abs value:     " << c.maxAbsValue << "\n";
+            }
+
+            std::cout << "\n=== Summary ===\n";
+            std::cout << "Total blocks:        " << totalBlocks << "\n";
+            std::cout << "Total empty blocks:  " << totalEmptyBlocks << "\n";
+            std::cout << "Total RLE ints:      " << totalRleInts << "\n";
+            std::cout << "Total non-zero tokens: " << totalNonZeroTokens << "\n";
+
+            if (totalBlocks > 0) {
+                const double avgTokens =
+                    static_cast<double>(totalNonZeroTokens) /
+                    static_cast<double>(totalBlocks);
+
+                std::cout << "Avg tokens/block:    " << avgTokens << "\n";
+            }
+        }
+
+        std::cout << "\nFrame payload sizes:\n";
+        const std::size_t maxFramesToPrint = 20;
+        const std::size_t framesToPrint = std::min(maxFramesToPrint, info.framesInfo.size());
+
+        for (std::size_t i = 0; i < framesToPrint; ++i) {
+            std::cout << "  Frame " << i << ":          ";
+            printBytesAsKb(info.framesInfo[i].payloadSize);
+            std::cout << " (" << info.framesInfo[i].payloadSize << " bytes)\n";
+        }
+
+        if (info.framesInfo.size() > framesToPrint) {
+            std::cout << "  ... " << (info.framesInfo.size() - framesToPrint) << " more frames\n";
+        }
+
+        std::cout << "\nInfo done.\n";
         return 0;
     }
 
@@ -2075,6 +2207,8 @@ int main(int argc, char* argv[]) {
         // Special mode:
         //   diplom.exe -info file.walsh
         //   diplom.exe file.walsh -info
+        //   diplom.exe -info file.wlsv
+        //   diplom.exe file.wlsv -info
         for (int i = 1; i < argc; ++i) {
             const std::string arg = argv[i];
             const std::string lowerArg = toLowerCopy(arg);
@@ -2087,7 +2221,7 @@ int main(int argc, char* argv[]) {
                         infoPath = argv[i + 1];
                     }
                 } else {
-                    if (argc >= 2 && isWalshFile(argv[1])) {
+                    if (argc >= 2 && (isWalshFile(argv[1]) || isWalshVideoFile(argv[1]))) {
                         infoPath = argv[1];
                     } else if (i + 1 < argc && !isOption(argv[i + 1])) {
                         infoPath = argv[i + 1];
@@ -2095,16 +2229,20 @@ int main(int argc, char* argv[]) {
                 }
 
                 if (infoPath.empty()) {
-                    std::cerr << "Error: missing .walsh file for -info.\n";
+                    std::cerr << "Error: missing .walsh or .wlsv file for -info.\n";
                     return 1;
                 }
 
-                if (!isWalshFile(infoPath)) {
-                    std::cerr << "Error: -info expects a .walsh file.\n";
-                    return 1;
+                if (isWalshFile(infoPath)) {
+                    return runWalshInfo(infoPath);
                 }
 
-                return runWalshInfo(infoPath);
+                if (isWalshVideoFile(infoPath)) {
+                    return runWalshVideoInfo(infoPath);
+                }
+
+                std::cerr << "Error: -info expects a .walsh or .wlsv file.\n";
+                return 1;
             }
         }
 
