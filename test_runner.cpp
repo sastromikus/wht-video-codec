@@ -1,28 +1,32 @@
 #include "test_runner.h"
 
-#include <iostream>
-#include <fstream>
-#include <vector>
-#include <string>
-#include <chrono>
+#include "codec.h"
+#include "encoded_io.h"
+#include "image_io.h"
+#include "metrics.h"
+
 #include <algorithm>
 #include <cerrno>
-#include <windows.h>
-#include <intrin.h>
-#include <sstream>
+#include <chrono>
+#include <cctype>
 #include <cstring>
-
-#include "types.h"
-#include "image_io.h"
-#include "codec.h"
-#include "metrics.h"
-#include "encoded_io.h"
+#include <fstream>
+#include <iostream>
+#include <sstream>
+#include <string>
+#include <thread>
+#include <vector>
 
 #ifdef _WIN32
 #include <direct.h>
+#include <intrin.h>
+#include <windows.h>
 #else
+#include <dirent.h>
 #include <sys/stat.h>
+#include <sys/sysinfo.h>
 #include <sys/types.h>
+#include <unistd.h>
 #endif
 
 static int createDirectory(const char* path) {
@@ -89,7 +93,8 @@ namespace {
     };
 
     static std::string getCpuName() {
-        int cpuInfo[4] = { -1, -1, -1, -1 };
+#ifdef _WIN32
+        int cpuInfo[4] = {-1, -1, -1, -1};
         char brand[49] = {};
 
         __cpuid(cpuInfo, 0x80000000);
@@ -112,15 +117,41 @@ namespace {
         }
 
         return name.empty() ? "Unknown CPU" : name;
+#else
+        std::ifstream cpuinfo("/proc/cpuinfo");
+        std::string line;
+
+        while (std::getline(cpuinfo, line)) {
+            const std::string key = "model name";
+            if (line.rfind(key, 0) == 0) {
+                const std::size_t colon = line.find(':');
+                if (colon != std::string::npos) {
+                    std::string name = line.substr(colon + 1);
+                    while (!name.empty() && name.front() == ' ') {
+                        name.erase(name.begin());
+                    }
+                    return name.empty() ? "Unknown CPU" : name;
+                }
+            }
+        }
+
+        return "Unknown CPU";
+#endif
     }
 
     static unsigned int getLogicalCoreCount() {
+#ifdef _WIN32
         SYSTEM_INFO si{};
         GetSystemInfo(&si);
         return si.dwNumberOfProcessors;
+#else
+        const unsigned int cores = std::thread::hardware_concurrency();
+        return cores == 0 ? 1 : cores;
+#endif
     }
 
     static unsigned long long getInstalledRamMB() {
+#ifdef _WIN32
         MEMORYSTATUSEX mem{};
         mem.dwLength = sizeof(mem);
 
@@ -129,10 +160,24 @@ namespace {
         }
 
         return static_cast<unsigned long long>(mem.ullTotalPhys / (1024ull * 1024ull));
+#else
+        struct sysinfo info {};
+        if (sysinfo(&info) != 0) {
+            return 0;
+        }
+
+        const unsigned long long totalBytes =
+            static_cast<unsigned long long>(info.totalram) *
+            static_cast<unsigned long long>(info.mem_unit);
+
+        return totalBytes / (1024ull * 1024ull);
+#endif
     }
 
     std::string toLowerCopy(std::string s) {
-        std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
         return s;
     }
 
@@ -191,11 +236,51 @@ namespace {
             return dir + fileName;
         }
 
+#ifdef _WIN32
         return dir + "\\" + fileName;
+#else
+        return dir + "/" + fileName;
+#endif
+    }
+
+    bool pathIsDirectory(const std::string& path) {
+#ifdef _WIN32
+        const DWORD attrs = GetFileAttributesA(path.c_str());
+        if (attrs == INVALID_FILE_ATTRIBUTES) {
+            return false;
+        }
+        return (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+#else
+        struct stat st {};
+        if (stat(path.c_str(), &st) != 0) {
+            return false;
+        }
+        return S_ISDIR(st.st_mode);
+#endif
+    }
+
+    bool pathIsRegularFile(const std::string& path) {
+#ifdef _WIN32
+        const DWORD attrs = GetFileAttributesA(path.c_str());
+        if (attrs == INVALID_FILE_ATTRIBUTES) {
+            return false;
+        }
+        return (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0;
+#else
+        struct stat st {};
+        if (stat(path.c_str(), &st) != 0) {
+            return false;
+        }
+        return S_ISREG(st.st_mode);
+#endif
     }
 
     bool ensureDirectoryExists(const std::string& dir) {
         if (dir.empty()) {
+            return true;
+        }
+
+        if (pathIsDirectory(dir)) {
             return true;
         }
 
@@ -204,21 +289,13 @@ namespace {
             return true;
         }
 
-        return errno == EEXIST;
-    }
-
-    bool pathIsDirectory(const std::string& path) {
-        DWORD attrs = GetFileAttributesA(path.c_str());
-        if (attrs == INVALID_FILE_ATTRIBUTES) {
-            return false;
-        }
-        return (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        return errno == EEXIST && pathIsDirectory(dir);
     }
 
     std::vector<std::string> collectInputFiles(const std::string& inputPathOrDir) {
         std::vector<std::string> files;
 
-        if (isLosslessInput(inputPathOrDir)) {
+        if (isLosslessInput(inputPathOrDir) && pathIsRegularFile(inputPathOrDir)) {
             files.push_back(inputPathOrDir);
             return files;
         }
@@ -227,6 +304,7 @@ namespace {
             return files;
         }
 
+#ifdef _WIN32
         const std::string pattern = joinPath(inputPathOrDir, "*.*");
 
         WIN32_FIND_DATAA findData{};
@@ -246,10 +324,29 @@ namespace {
             if (isLosslessInput(fullPath)) {
                 files.push_back(fullPath);
             }
-        }
-        while (FindNextFileA(hFind, &findData));
+        } while (FindNextFileA(hFind, &findData));
 
         FindClose(hFind);
+#else
+        DIR* dir = opendir(inputPathOrDir.c_str());
+        if (dir == nullptr) {
+            return files;
+        }
+
+        while (dirent* entry = readdir(dir)) {
+            const std::string name = entry->d_name;
+            if (name == "." || name == "..") {
+                continue;
+            }
+
+            const std::string fullPath = joinPath(inputPathOrDir, name);
+            if (pathIsRegularFile(fullPath) && isLosslessInput(fullPath)) {
+                files.push_back(fullPath);
+            }
+        }
+
+        closedir(dir);
+#endif
 
         std::sort(files.begin(), files.end());
         return files;
@@ -258,33 +355,40 @@ namespace {
     BenchmarkConfig getBenchmarkConfig() {
         BenchmarkConfig cfg{};
 
-    #ifdef _DEBUG
+#ifdef _DEBUG
         cfg.buildConfig = "Debug";
-    #else
+#else
         cfg.buildConfig = "Release";
-    #endif
+#endif
 
-    #ifdef _WIN64
+#if defined(_M_X64) || defined(__x86_64__) || defined(__aarch64__)
         cfg.platform = "x64";
-    #elif defined(_WIN32)
+#elif defined(_M_IX86) || defined(__i386__)
         cfg.platform = "x86";
-    #else
+#else
         cfg.platform = "unknown";
-    #endif
+#endif
 
-    #if __cplusplus >= 202302L
+#if __cplusplus >= 202302L
         cfg.cppStandard = "C++23_or_newer";
-    #elif __cplusplus >= 202002L
+#elif __cplusplus >= 202002L
         cfg.cppStandard = "C++20";
-    #elif __cplusplus >= 201703L
+#elif __cplusplus >= 201703L
         cfg.cppStandard = "C++17";
-    #elif __cplusplus >= 201402L
+#elif __cplusplus >= 201402L
         cfg.cppStandard = "C++14";
-    #else
+#else
         cfg.cppStandard = "pre-C++14";
-    #endif
+#endif
 
+#ifdef _WIN32
         cfg.os = "Windows";
+#elif defined(__linux__)
+        cfg.os = "Linux";
+#else
+        cfg.os = "Unix-like";
+#endif
+
         cfg.cpuName = getCpuName();
         cfg.logicalCores = getLogicalCoreCount();
         cfg.ramMB = getInstalledRamMB();
@@ -298,13 +402,13 @@ namespace {
             return false;
         }
 
-    out << "build_config,platform,cpp_standard,os,cpu_name,logical_cores,ram_mb,"
-           "input_name,scenario_name,mode,width,height,channels,"
-           "block_size,quant_step,"
-           "input_file_bytes,original_size_bytes,walsh_size_bytes,output_image_bytes,"
-           "compression_ratio,mse,psnr,"
-           "load_ms,prepare_ms,encode_ms,save_walsh_ms,decode_ms,save_image_ms,total_ms,"
-           "zero_percent_ch0,zero_percent_ch1,zero_percent_ch2,avg_zero_percent\n";
+        out << "build_config,platform,cpp_standard,os,cpu_name,logical_cores,ram_mb,"
+               "input_name,scenario_name,mode,width,height,channels,"
+               "block_size,quant_step,"
+               "input_file_bytes,original_size_bytes,walsh_size_bytes,output_image_bytes,"
+               "compression_ratio,mse,psnr,"
+               "load_ms,prepare_ms,encode_ms,save_walsh_ms,decode_ms,save_image_ms,total_ms,"
+               "zero_percent_ch0,zero_percent_ch1,zero_percent_ch2,avg_zero_percent\n";
 
         for (const auto& r : results) {
             out << cfg.buildConfig << ','
@@ -486,7 +590,9 @@ namespace {
         result.walshSizeBytes = getFileSize(walshPath);
         result.outputImageBytes = getFileSize(imagePath);
 
-        result.compressionRatio = result.walshSizeBytes > 0 ? static_cast<double>(result.originalSizeBytes) / static_cast<double>(result.walshSizeBytes) : 0.0;
+        result.compressionRatio = result.walshSizeBytes > 0
+            ? static_cast<double>(result.originalSizeBytes) / static_cast<double>(result.walshSizeBytes)
+            : 0.0;
 
         result.mse = calcMSE(metricReference, decodedImage);
         result.psnr = calcPSNR(metricReference, decodedImage);
