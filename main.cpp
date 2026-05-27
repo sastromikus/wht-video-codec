@@ -3,7 +3,6 @@
 #include <chrono>
 #include <cctype>
 #include <cstdint>
-#include <direct.h>
 #include <exception>
 #include <fstream>
 #include <iomanip>
@@ -20,6 +19,21 @@
 #include "encoded_video_io.h"
 #include "video_io_ffmpeg.h"
 #include "test_runner.h"
+
+#ifdef _WIN32
+#include <direct.h>
+#else
+#include <sys/stat.h>
+#include <sys/types.h>
+#endif
+
+static int createDirectory(const char* path) {
+#ifdef _WIN32
+    return _mkdir(path);
+#else
+    return mkdir(path, 0755);
+#endif
+}
 
 namespace {
     enum class WorkMode {
@@ -310,7 +324,7 @@ namespace {
             return true;
         }
 
-        const int result = _mkdir(dir.c_str());
+        const int result = createDirectory(dir.c_str());
 
         if (result == 0) {
             return true;

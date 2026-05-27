@@ -6,7 +6,6 @@
 #include <string>
 #include <chrono>
 #include <algorithm>
-#include <direct.h>
 #include <cerrno>
 #include <windows.h>
 #include <intrin.h>
@@ -18,6 +17,21 @@
 #include "codec.h"
 #include "metrics.h"
 #include "encoded_io.h"
+
+#ifdef _WIN32
+#include <direct.h>
+#else
+#include <sys/stat.h>
+#include <sys/types.h>
+#endif
+
+static int createDirectory(const char* path) {
+#ifdef _WIN32
+    return _mkdir(path);
+#else
+    return mkdir(path, 0755);
+#endif
+}
 
 namespace {
     struct TestScenario {
@@ -185,7 +199,7 @@ namespace {
             return true;
         }
 
-        const int result = _mkdir(dir.c_str());
+        const int result = createDirectory(dir.c_str());
         if (result == 0) {
             return true;
         }
